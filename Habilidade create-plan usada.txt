@@ -1,0 +1,189 @@
+Habilidade create-plan usada
+Perfeito. Vou seguir o fluxo estruturado de planejamento. Este é um projeto novo (não existe codebase anterior), então posso ir direto para esclarecer alguns pontos de design antes de escrever o plano.
+
+O aplicativo precisa de uma interface gráfica (UI) ou pode ser completamente headless (sem tela) após iniciar a gravação? Isso impacta o escopo do MainActivity e da notificação persistente.
+
+
+UI mínima: apenas um botão para iniciar/parar e um seletor de câmera (frontal/traseira). Após iniciar, a tela pode ser fechada.
+
+
+
+Completamente headless: o app inicia a gravação automaticamente ao abrir e não precisa de nenhuma tela visual.
+
+
+
+UI mínima com preview ao vivo enquanto a tela estiver aberta, e sem preview quando minimizado (economia de RAM/GPU).
+
+
+
+
+Para o armazenamento dos vídeos: o enunciado menciona "armazenamento interno do celular" no perfil do dispositivo, mas o LoopManager faz referência a "Cartão SD". Onde os vídeos devem ser salvos prioritariamente?
+
+
+Armazenamento interno do dispositivo (diretório de arquivos externos do app, sem necessidade de permissão WRITE_EXTERNAL_STORAGE no Android 10+)
+
+
+
+Cartão SD externo (quando disponível), com fallback para armazenamento interno
+
+
+
+Cartão SD externo obrigatório — app não funciona sem ele
+
+
+
+
+O aplicativo deve iniciar automaticamente após o boot do dispositivo (receiver BOOT_COMPLETED) ou apenas quando o usuário abre manualmente?
+
+
+Iniciar automaticamente após o boot — ideal para uso veicular contínuo.
+
+
+
+Iniciar apenas manualmente pelo usuário — mais simples, sem BootReceiver.
+
+
+
+
+Qual deve ser o comportamento da câmera padrão ao abrir o app — Traseira ou Frontal — e o usuário precisa poder trocar em tempo real (durante a gravação) ou apenas antes de iniciar?
+
+
+Traseira como padrão, troca apenas antes de iniciar a gravação (mais simples e seguro para o hardware)
+
+
+
+Frontal como padrão, troca apenas antes de iniciar a gravação
+
+
+
+Traseira como padrão, com botão para trocar em tempo real mesmo durante a gravação (para a gravação, troca, reinicia)
+
+
+
+
+Ótimo. Tenho todas as informações necessárias. Agora vou escrever o plano completo.
+
+Antes de escrever o arquivo, deixa eu confirmar a arquitetura geral com um diagrama:
+
+bind/start
+
+SwitchCamera
+
+usa
+
+delega
+
+delega
+
+grava segmentos de 3min
+
+verifica espaço livre
+
+apaga arquivo mais antigo se less than 2GB livres
+
+acelerômetro greater than 15m/s²
+
+move para
+
+notificação persistente
+
+onStop - sem preview
+
+MainActivity
+
+RecordingService - Foreground
+
+CameraX VideoCapture
+
+LoopManager
+
+ImpactDetector
+
+Armazenamento Interno
+
+Proteção do arquivo atual
+
+Dashcam/Protected
+
+Android Notification
+
+
+
+Agora escrevendo o plano:
+
+
+
+antes prosseguir preciso saber se o projeto esta levando em conta que a camera frontal e a traseira devem estar gravando simultaneamente e que não será exibida a preview da gravação na tela como forma de economizar recursos do sistema e bateria. o app deve ser capaz de funcionar mesmo com o celular bloquedo e ter prioridade maxima na sua execução. deve-se considerar tambem que só possui 2gb de ram e 32gb de armazenamento, então devem ser tomadas as medidas necessarias porar otimizar ao maximo o funcionamento do app. o celular em questão esta configurado em modo dev e disponivel para testes.
+
+Ótima oportunidade para alinhar antes de escrever o plano. Deixa eu investigar a limitação de hardware do Snapdragon 439 para embasar a resposta corretamente.
+
+Tenho o suficiente baseado no conhecimento técnico consolidado sobre o chipset. Vou responder com precisão técnica antes de prosseguir com o plano.
+
+Resposta Técnica: Gravação Simultânea Frontal + Traseira no Snapdragon 439
+Preciso ser direto sobre uma limitação de hardware crítica que impacta o escopo do projeto:
+
+❌ Gravação simultânea dual camera NÃO é viável neste dispositivo
+O Snapdragon 439 possui um único ISP (Image Signal Processor) — o Qualcomm Spectra 150. Ele é fisicamente incapaz de processar dois pipelines de câmera independentes ao mesmo tempo para codificação de vídeo. Isso não é uma limitação de software — é uma restrição de silicon.
+
+O que acontece se tentar:
+
+O Camera2 API / CameraX lançará CameraAccessException ao tentar abrir a segunda câmera enquanto a primeira está gravando
+Mesmo que não lance exceção imediatamente, o driver multiplexará o ISP resultando em: dropped frames severos, superaquecimento acelerado, possível crash do serviço de câmera do sistema
+Evidência concreta: O CameraX ConcurrentCamera API (introduzida no CameraX 1.3) exige que o dispositivo declare suporte a StreamConfigurationMap para câmeras concorrentes via CameraManager.getCameraCharacteristics. O Redmi 8A com Snapdragon 439 não declara esse suporte.
+
+✅ O que o plano contempla corretamente (e deve manter)
+Hardware ISP único
+
+Uma câmera ativa por vez
+
+Seleção: Frontal OU Traseira
+
+Gravação contínua em loop
+
+
+
+Sem preview — já está no plano original (economiza GPU + RAM)
+Foreground Service com WakeLock — mantém execução com tela bloqueada ✅
+Prioridade máxima — precisamos adicionar android:persistent e ajuste de processo ✅
+🔧 Ajustes que preciso incorporar no plano baseado nos seus novos requisitos
+Requisito Novo	Solução Técnica
+Sem preview nenhum (nem na tela aberta)	Remover PreviewView — UI vira apenas painel de controle
+Tela bloqueada — app continua	WakeLock + FOREGROUND_SERVICE + startForegroundService já cobre
+Prioridade máxima de processo	android:process=":dashcam" + Process.setThreadPriority(THREAD_PRIORITY_URGENT_AUDIO) no service
+32 GB armazenamento total	Limiar do LoopManager ajustado para 3 GB livres (mais conservador) e segmentos de 3 min (~150 MB cada em 720p)
+2 GB RAM	Heap limitado — sem preview poupa ~80-120 MB; sem bitmap cache; MediaCodec configurado com bitrate moderado (2 Mbps)
+Dado que o Snapdragon 439 possui um único ISP e não suporta gravação simultânea das duas câmeras, qual deve ser a estratégia do app?
+
+
+Gravar apenas com a câmera TRASEIRA (mais útil como dashcam veicular) — câmera frontal disponível como opção via botão, mas nunca simultaneamente
+
+
+
+Gravar apenas com a câmera FRONTAL por padrão — câmera traseira disponível como opção via botão, mas nunca simultaneamente
+
+
+
+Alternar automaticamente entre frontal e traseira em intervalos configuráveis (ex: 30 segundos cada) — sem preview, gravação contínua alternada
+
+
+
+Gravar com a câmera traseira E eliminar completamente a opção de câmera frontal — app mais simples, mais estável e menor consumo
+
+
+
+
+Confirma que o app NÃO deve exibir preview em nenhum momento — nem quando a tela está aberta? A MainActivity seria apenas um painel de controle (botões iniciar/parar/trocar câmera + status de texto)?
+
+
+Sim — sem preview em nenhum momento. MainActivity é só painel de controle com botões e texto de status.
+
+
+
+Preview somente quando a MainActivity está visível (foreground), mas desligado ao minimizar/bloquear.
+
+
+
+Preview opcional — o usuário pode ativar/desativar via toggle na UI.
+
+
+
